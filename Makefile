@@ -43,9 +43,9 @@ export RUSTFLAGS       := -L $(SYSROOT)/lib/wasm32-emscripten \
 	-C link-args=-sINITIAL_MEMORY=536870912 \
 	-C link-args=-sMAXIMUM_MEMORY=1073741824
 
-.PHONY: all setup deps build bundle check clean distclean
+.PHONY: all setup deps build bundle format check clean distclean
 
-all: setup deps build check
+all: setup deps build format check
 
 # ── Setup ─────────────────────────────────────────────────────
 setup: setup-rust setup-submodules
@@ -111,6 +111,13 @@ bundle:
 	@echo "Compile a test document with native tectonic to populate cache:"
 	@echo "  tectonic test.tex"
 	@echo "Then run: ./scripts/create-bundle.sh"
+
+# ── Format ────────────────────────────────────────────────────
+# Generate latex.fmt using the WASM engine (INITEX mode)
+# This ensures the format is compatible with the WASM build
+format: build
+	@echo "=== Generating WASM-native latex.fmt ==="
+	@./scripts/generate-format.sh $(OUTPUT_DIR)/tectonic_wasm.wasm $(OUTPUT_DIR)
 
 # ── Validate ──────────────────────────────────────────────────
 check:

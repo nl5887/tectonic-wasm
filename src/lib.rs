@@ -99,6 +99,7 @@ impl IoProvider for MemoryIo {
     }
 
     fn output_open_stdout(&mut self) -> OpenResult<OutputHandle> {
+        eprintln!("[wasm-io] output_open_stdout: providing sink");
         OpenResult::Ok(OutputHandle::new("stdout", CaptureWriter { name: "stdout".to_string(), buffer: Vec::new() }))
     }
 
@@ -114,9 +115,14 @@ impl IoProvider for MemoryIo {
         }
         match self.inputs.get(name) {
             Some(data) => {
-                // Rc::as_ref gives &Vec<u8>, clone the Vec for the Cursor (unavoidable for Read trait)
-                // But this is per-file-read, not per-compile
-                OpenResult::Ok(InputHandle::new(name, Cursor::new((**data).clone()), InputOrigin::Other))
+                let cloned = (**data).clone();
+                if name.ends_with(".tfm") {
+                    eprintln!("[wasm-io] input_open: {} -> found ({} bytes, first 8: {:?})", 
+                        name, cloned.len(), &cloned[..std::cmp::min(8, cloned.len())]);
+                } else {
+                    eprintln!("[wasm-io] input_open: {} -> found ({} bytes)", name, cloned.len());
+                }
+                OpenResult::Ok(InputHandle::new(name, Cursor::new(cloned), InputOrigin::Other))
             }
             None => {
                 if let Some(fallback) = find_font_fallback(name, &self.inputs) {
@@ -135,6 +141,7 @@ impl IoProvider for MemoryIo {
         &mut self,
         _status: &mut dyn tectonic_status_base::StatusBackend,
     ) -> OpenResult<InputHandle> {
+        eprintln!("[wasm-io] input_open_primary called, has_input={}", self.primary_input.is_some());
         match &self.primary_input {
             Some(data) => {
                 eprintln!("[wasm-io] input_open_primary: texput.tex ({} bytes)", data.len());
@@ -342,4 +349,66 @@ pub extern "C" fn tectonic_list_outputs(buf_ptr: *mut u8, buf_len: usize) -> usi
         unsafe { std::ptr::copy_nonoverlapping(bytes.as_ptr(), buf_ptr, len); }
         len
     })
+}
+
+#[no_mangle]
+pub extern "C" fn tectonic_create_format() -> i32 {
+    eprintln!("[wasm] creating format file (INITEX mode)...");
+    OUTPUTS.with(|o| o.borrow_mut().clear());
+
+    let mut io = MemoryIo::new();
+    // Set latex.ltx as primary input for format generation
+    unsafe {
+        if let Some(f) = &FILES {
+            eprintln!("[wasm] {} files available for format creation", f.len());
+            io.inputs = f.iter().map(|(k, v)| (k.clone(), Rc::clone(v))).collect();
+            // Use xelatex.ini as primary input (which loads latex.ltx)
+            if let Some(ltx) = f.get("xelatex.ini") {
+                io.primary_input = Some((**ltx).clone());
+                eprintln!("[wasm] Set xelatex.ini ({} bytes) as primary input", ltx.len());
+            } else if let Some(ltx) = f.get("latex.ltx") {
+                io.primary_input = Some((**ltx).clone());
+                eprintln!("[wasm] Set latex.ltx ({} bytes) as primary input (fallback)", ltx.len());
+            } else {
+                eprintln!("[wasm] ERROR: latex.ltx not found!");
+                return 1;
+            }
+        }
+    }
+
+    let mut driver = MinimalDriver::new(io);
+    let mut status = NoopStatusBackend::default();
+    let mut launcher = CoreBridgeLauncher::new(&mut driver, &mut status);
+    let mut engine = TexEngine::default();
+    engine.initex_mode(true);
+    engine.halt_on_error_mode(false);
+
+    eprintln!("[wasm] running XeTeX in INITEX mode...");
+    match engine.process(&mut launcher, "latex", "xelatex.ini") {
+        Ok(outcome) => eprintln!("[wasm] INITEX finished: {:?}", outcome),
+        Err(e) => {
+            eprintln!("[wasm] INITEX error: {:?}", e);
+            return 1;
+        }
+    }
+
+    drop(launcher);
+    drop(driver);
+
+    // The format should be in OUTPUTS as "latex.fmt"
+    OUTPUTS.with(|o| {
+        let outputs = o.borrow();
+        if let Some(fmt) = outputs.get("latex.fmt") {
+            eprintln!("[wasm] Format file generated: {} bytes", fmt.len());
+            // Store it in FILES for use by tectonic_compile
+            get_files().insert("latex.fmt".to_string(), Rc::new(fmt.clone()));
+        } else {
+            eprintln!("[wasm] WARNING: No format file produced!");
+            for (name, data) in outputs.iter() {
+                eprintln!("[wasm] Output: {} ({} bytes)", name, data.len());
+            }
+        }
+    });
+
+    0
 }
