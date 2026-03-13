@@ -39,6 +39,47 @@ impl Drop for CaptureWriter {
     }
 }
 
+
+/// Try to find a fallback font file for a given font name.
+/// XeTeX uses [fontname]:mapping=tex-text; syntax — we strip that and find closest match.
+fn find_font_fallback(name: &str, inputs: &HashMap<String, Rc<Vec<u8>>>) -> Option<String> {
+    let clean = name
+        .trim_start_matches('[')
+        .split(']').next().unwrap_or(name)
+        .split(':').next().unwrap_or(name)
+        .split(';').next().unwrap_or(name)
+        .trim();
+
+    if clean.is_empty() { return None; }
+
+    // Try with common font extensions
+    for ext in &[".otf", ".ttf", ".pfb"] {
+        let candidate = format!("{}{}", clean, ext);
+        if inputs.contains_key(&candidate) {
+            return Some(candidate);
+        }
+    }
+
+    // Fuzzy match: lmroman9-regular -> lmroman10-regular
+    let lower = clean.to_lowercase();
+    if let Some(pos) = lower.find(|c: char| c.is_ascii_digit()) {
+        let prefix = &lower[..pos];
+        let rest = &lower[pos..];
+        let style_start = rest.find(|c: char| !c.is_ascii_digit()).unwrap_or(rest.len());
+        let style = &rest[style_start..];
+        for size in &["10", "12", "7", "17", "5", "6", "8", "9"] {
+            for ext in &[".otf", ".ttf", ".pfb"] {
+                let candidate = format!("{}{}{}{}", prefix, size, style, ext);
+                if inputs.contains_key(&candidate) {
+                    eprintln!("[wasm-io] font fallback: '{}' -> '{}'", name, candidate);
+                    return Some(candidate);
+                }
+            }
+        }
+    }
+    None
+}
+
 /// Memory-optimized IoProvider using Rc<Vec<u8>> — cloning shares data, doesn't copy
 struct MemoryIo {
     inputs: HashMap<String, Rc<Vec<u8>>>,
@@ -77,7 +118,16 @@ impl IoProvider for MemoryIo {
                 // But this is per-file-read, not per-compile
                 OpenResult::Ok(InputHandle::new(name, Cursor::new((**data).clone()), InputOrigin::Other))
             }
-            None => OpenResult::NotAvailable,
+            None => {
+                if let Some(fallback) = find_font_fallback(name, &self.inputs) {
+                    if let Some(data) = self.inputs.get(&fallback) {
+                        return OpenResult::Ok(InputHandle::new(
+                            &fallback, Cursor::new((**data).clone()), InputOrigin::Other,
+                        ));
+                    }
+                }
+                OpenResult::NotAvailable
+            }
         }
     }
 
@@ -128,7 +178,7 @@ fn get_files() -> &'static mut HashMap<String, Rc<Vec<u8>>> {
 }
 
 #[no_mangle]
-pub extern "C" fn tectonic_wasm_version() -> i32 { 5 }
+pub extern "C" fn tectonic_wasm_version() -> i32 { 8 }
 
 #[no_mangle]
 pub extern "C" fn tectonic_set_input(ptr: *const u8, len: usize) {
@@ -169,7 +219,7 @@ pub extern "C" fn tectonic_compile() -> i32 {
     let mut status = NoopStatusBackend::default();
     let mut launcher = CoreBridgeLauncher::new(&mut driver, &mut status);
     let mut engine = TexEngine::default();
-    engine.halt_on_error_mode(true);
+    engine.halt_on_error_mode(false);
 
     eprintln!("[wasm] running XeTeX engine (pass 1)...");
     match engine.process(&mut launcher, "latex", "texput") {
@@ -214,7 +264,7 @@ pub extern "C" fn tectonic_compile() -> i32 {
         let mut status2 = NoopStatusBackend::default();
         let mut launcher2 = CoreBridgeLauncher::new(&mut driver2, &mut status2);
         let mut engine2 = TexEngine::default();
-        engine2.halt_on_error_mode(true);
+        engine2.halt_on_error_mode(false);
 
         match engine2.process(&mut launcher2, "latex", "texput") {
             Ok(outcome) => eprintln!("[wasm] XeTeX pass 2 finished: {:?}", outcome),
