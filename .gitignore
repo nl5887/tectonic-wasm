@@ -1,0 +1,8 @@
+# Build artifacts
+target/
+pkgconfig/
+
+# OS
+.DS_Store
+*.swp
+*~

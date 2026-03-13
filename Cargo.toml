@@ -1,0 +1,24 @@
+[package]
+name = "tectonic-wasm"
+version = "0.1.0"
+edition = "2021"
+description = "Tectonic TeX engine compiled to WebAssembly"
+license = "MIT"
+
+[lib]
+crate-type = ["cdylib"]
+
+[dependencies]
+tectonic_engine_xetex = { path = "tectonic/crates/engine_xetex", default-features = false }
+tectonic_engine_xdvipdfmx = { path = "tectonic/crates/engine_xdvipdfmx", default-features = false }
+tectonic_engine_bibtex = { path = "tectonic/crates/engine_bibtex", default-features = false }
+tectonic_bridge_core = { path = "tectonic/crates/bridge_core", default-features = false }
+tectonic_io_base = { path = "tectonic/crates/io_base", default-features = false }
+tectonic_status_base = { path = "tectonic/crates/status_base", default-features = false }
+tectonic_errors = { path = "tectonic/crates/errors", default-features = false }
+
+[workspace]
+resolver = "2"
+
+[workspace.lints.rust]
+unexpected_cfgs = { level = "warn", check-cfg = ['cfg(web_sys_unstable_apis)'] }

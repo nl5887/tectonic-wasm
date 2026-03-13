@@ -1,0 +1,6 @@
+[submodule "tectonic"]
+	path = tectonic
+	url = https://github.com/tectonic-typesetting/tectonic.git
+[submodule "emsdk"]
+	path = emsdk
+	url = https://github.com/emscripten-core/emsdk.git
