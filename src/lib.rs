@@ -11,6 +11,18 @@ use tectonic_engine_xdvipdfmx::XdvipdfmxEngine;
 use tectonic_io_base::{InputOrigin, InputHandle, IoProvider, OpenResult, OutputHandle};
 use tectonic_status_base::NoopStatusBackend;
 
+extern "C" {
+    /// Ask the JS host to provide a file by name.
+    /// Returns 1 if the file was found, 0 if not.
+    /// On success, the JS side writes a malloc'd pointer and length to the out params.
+    fn js_request_file(
+        name_ptr: *const u8,
+        name_len: usize,
+        data_ptr_out: *mut u32,
+        data_len_out: *mut u32,
+    ) -> i32;
+}
+
 thread_local! {
     static OUTPUTS: RefCell<HashMap<String, Vec<u8>>> = RefCell::new(HashMap::new());
 }
@@ -125,6 +137,7 @@ impl IoProvider for MemoryIo {
                 OpenResult::Ok(InputHandle::new(name, Cursor::new(cloned), InputOrigin::Other))
             }
             None => {
+                // Try font fallback first
                 if let Some(fallback) = find_font_fallback(name, &self.inputs) {
                     if let Some(data) = self.inputs.get(&fallback) {
                         return OpenResult::Ok(InputHandle::new(
@@ -132,7 +145,33 @@ impl IoProvider for MemoryIo {
                         ));
                     }
                 }
-                OpenResult::NotAvailable
+
+                // Ask JS host for the file on-demand
+                let mut data_ptr: u32 = 0;
+                let mut data_len: u32 = 0;
+                let name_bytes = name.as_bytes();
+                let found = unsafe {
+                    js_request_file(
+                        name_bytes.as_ptr(),
+                        name_bytes.len(),
+                        &mut data_ptr as *mut u32,
+                        &mut data_len as *mut u32,
+                    )
+                };
+
+                if found != 0 && data_ptr != 0 && data_len > 0 {
+                    let data = unsafe {
+                        std::slice::from_raw_parts(data_ptr as *const u8, data_len as usize)
+                    }.to_vec();
+                    eprintln!("[wasm-io] input_open: {} -> fetched from JS ({} bytes)", name, data.len());
+                    // Cache for subsequent requests within this compilation
+                    let rc_data = Rc::new(data.clone());
+                    self.inputs.insert(name.to_string(), rc_data);
+                    OpenResult::Ok(InputHandle::new(name, Cursor::new(data), InputOrigin::Other))
+                } else {
+                    eprintln!("[wasm-io] input_open: {} -> NOT FOUND", name);
+                    OpenResult::NotAvailable
+                }
             }
         }
     }
@@ -168,6 +207,31 @@ impl IoProvider for MemoryIo {
                 return OpenResult::Ok(InputHandle::new(candidate, Cursor::new((**data).clone()), InputOrigin::Other));
             }
         }
+
+        // Try fetching the format file from JS before falling back to input_open_name
+        for candidate in &candidates {
+            let name_bytes = candidate.as_bytes();
+            let mut data_ptr: u32 = 0;
+            let mut data_len: u32 = 0;
+            let found = unsafe {
+                js_request_file(
+                    name_bytes.as_ptr(),
+                    name_bytes.len(),
+                    &mut data_ptr as *mut u32,
+                    &mut data_len as *mut u32,
+                )
+            };
+            if found != 0 && data_ptr != 0 && data_len > 0 {
+                let data = unsafe {
+                    std::slice::from_raw_parts(data_ptr as *const u8, data_len as usize)
+                }.to_vec();
+                eprintln!("[wasm-io] input_open_format: {} -> fetched from JS as '{}' ({} bytes)", name, candidate, data.len());
+                let rc_data = Rc::new(data.clone());
+                self.inputs.insert(candidate.to_string(), rc_data);
+                return OpenResult::Ok(InputHandle::new(candidate, Cursor::new(data), InputOrigin::Other));
+            }
+        }
+
         self.input_open_name(name, status)
     }
 }
